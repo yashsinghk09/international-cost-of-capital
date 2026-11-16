@@ -11,7 +11,7 @@ A Streamlit app that compares a project's **cost of equity, cost of debt and WAC
   | U.S. industry **unlevered beta** | [Aswath Damodaran – betas.xls](https://pages.stern.nyu.edu/~adamodar/pc/datasets/betas.xls) | Parses the *Industry Averages* sheet, column **Unlevered beta** |
   | **USD BBB spread** | [Damodaran – ratings.html](https://pages.stern.nyu.edu/adamodar/New_Home_Page/datafile/ratings.html) | **Baa2/BBB** row of the large non-financial firms table |
   | **Corporate tax rates** | [OECD Corporate Tax Statistics](https://www.oecd.org/en/publications/corporate-tax-statistics-2024_9c27d6e8-en/full-report/statutory-corporate-income-tax-rates_440f9286.html) | Combined statutory CIT rate, latest year, from the OECD Data Explorer (SDMX) feed of the same database; falls back to the report page |
-  | **10Y government bond yields** | [Trading Economics – Bonds](https://tradingeconomics.com/bonds) | Scrapes the page, no API key needed |
+  | **10Y government bond yields** | [Trading Economics – Bonds](https://tradingeconomics.com/bonds) | Scraped live, no API key needed. If blocked, the app uses a built-in snapshot (see below) |
 
 - A **sources table** lists every value used, where it came from (fetched, manual override or auto-calculated), the source, the data date and the fetch time.
 - **Settings:** industry, target country, equity risk premium and target debt share.
@@ -49,7 +49,13 @@ The app also shows a consistency check: the USD WACC converted with the same dif
 2. Local 10Y yields may include sovereign default risk, so in riskier countries the local "risk-free" rate and cost of equity may be overstated.
 3. No separate country risk premium is added. Raise the ERP if you want one.
 4. Tax rates are statutory (combined central plus sub-central) rates, and interest is assumed fully deductible.
-5. **Scraping is fragile.** If a site changes its layout or blocks the Streamlit Cloud server, the app shows a warning, turns on the manual input for the missing value, and records the error under *Fetch status and errors*.
+5. **Snapshot yields are fixed** at the snapshot date and do not update until you replace the snapshot.
+6. **Scraping is fragile.** If a site changes its layout or blocks the Streamlit Cloud server, the app shows a warning, turns on the manual input for the missing value, and records the error under *Fetch status and errors*.
+
+### If Trading Economics blocks the live request
+Trading Economics often blocks requests from cloud servers such as Streamlit Community Cloud. When that happens, the app uses a full snapshot of tradingeconomics.com/bonds that is built into `app.py`: 54 countries plus the Euro area, scraped on **2026-11-16**. A notice appears in the app, and the sources table shows the snapshot date and each country's quote date.
+
+To update the snapshot, re-scrape the page and replace `TE_SNAPSHOT` and `TE_SNAPSHOT_DATE` near the top of `app.py`. Each entry has the form `"country-slug": (yield_percent, "quote date")`.
 
 ## Run locally
 

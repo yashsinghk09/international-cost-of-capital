@@ -9,6 +9,7 @@ Data sources (fetched live, cached for 12 hours, refreshable from the sidebar):
   * USD BBB (Baa2) spread      - Aswath Damodaran, NYU Stern (ratings.html)
   * Statutory corporate tax    - OECD Corporate Tax Statistics
   * 10-year government yields  - Trading Economics (tradingeconomics.com/bonds)
+                                 (embedded snapshot used if the live scrape is blocked)
 """
 
 from __future__ import annotations
@@ -48,6 +49,66 @@ OECD_SDMX_URL = (
     "?dimensionAtObservation=AllDimensions&format=csvfilewithlabels"
 )
 TE_URL = "https://tradingeconomics.com/bonds"
+# Snapshot of tradingeconomics.com/bonds (10Y yield %, quote date), used only if the
+# live scrape is blocked. Re-scrape and replace to update.
+TE_SNAPSHOT_DATE = "2026-11-16 10:36 CT"
+TE_SNAPSHOT = {
+    "united-states": (5.1420, "Nov/16"),
+    "united-kingdom": (5.3643, "Nov/16"),
+    "japan": (2.8880, "Nov/16"),
+    "australia": (5.1190, "Nov/16"),
+    "germany": (3.3827, "Nov/16 10:36"),
+    "brazil": (15.3450, "Nov/16"),
+    "russia": (16.7400, "Nov/13"),
+    "india": (7.3180, "Nov/16"),
+    "canada": (3.8130, "Nov/16"),
+    "italy": (4.4570, "Nov/16"),
+    "france": (4.9520, "Nov/16"),
+    "south-africa": (8.7200, "Nov/16"),
+    "china": (1.6331, "Nov/16"),
+    "switzerland": (0.5800, "Nov/16"),
+    "mexico": (9.3080, "Nov/13"),
+    "netherlands": (3.4690, "Nov/16"),
+    "new-zealand": (4.7740, "Nov/16"),
+    "portugal": (3.8460, "Nov/16"),
+    "south-korea": (3.9860, "Nov/16"),
+    "spain": (3.9640, "Nov/16 10:36"),
+    "greece": (4.2950, "Nov/16"),
+    "turkey": (36.4750, "Nov/16"),
+    "finland": (3.7600, "Nov/16"),
+    "lithuania": (4.3390, "Nov/16"),
+    "norway": (4.3910, "Nov/16"),
+    "poland": (6.3360, "Nov/16"),
+    "romania": (7.1600, "Nov/16"),
+    "slovakia": (4.3000, "Nov/16"),
+    "slovenia": (3.9390, "Nov/16"),
+    "sweden": (3.1000, "Nov/16"),
+    "hungary": (5.5250, "Nov/16"),
+    "iceland": (6.8100, "Nov/16"),
+    "ireland": (3.5210, "Nov/16"),
+    "austria": (3.6220, "Nov/16 10:36"),
+    "belgium": (4.3980, "Nov/16 10:36"),
+    "croatia": (3.8668, "Nov/13"),
+    "czech-republic": (5.2600, "Nov/16"),
+    "denmark": (3.1710, "Nov/16"),
+    "euro-area": (3.94, "Nov/13"),
+    "peru": (6.2414, "Nov/13"),
+    "chile": (6.0100, "Nov/13"),
+    "colombia": (12.6980, "Nov/13"),
+    "singapore": (2.3429, "Nov/16"),
+    "taiwan": (1.8700, "Nov/16"),
+    "thailand": (1.9830, "Nov/16"),
+    "vietnam": (4.5730, "Nov/16"),
+    "hong-kong": (3.9960, "Nov/16"),
+    "indonesia": (7.6070, "Nov/16"),
+    "israel": (4.1270, "Nov/16"),
+    "malaysia": (3.8654, "Nov/16"),
+    "pakistan": (12.6220, "Nov/16"),
+    "philippines": (7.7030, "Nov/16"),
+    "zambia": (14.7400, "Nov/13"),
+    "kenya": (12.5000, "Nov/16"),
+    "nigeria": (16.5960, "Nov/13"),
+}
 
 DEFAULT_INDUSTRY = "Software (System & Application)"
 DEFAULT_COUNTRY = "United States"
@@ -338,48 +399,51 @@ def fetch_tax_rates() -> dict:
                   error="; ".join(errors))
 
 
+def _parse_te(html: str) -> dict:
+    """Parse tradingeconomics.com/bonds: each row links to /<country>/government-bond-yield."""
+    soup = BeautifulSoup(html, "lxml")
+    yields = {}
+    for a in soup.find_all("a", href=True):
+        m = re.match(r"^/([a-z\-]+)/government-bond-yield/?$", a["href"])
+        if not m:
+            continue
+        key = canon(m.group(1).replace("-", " "))
+        if key in yields:
+            continue
+        tr = a.find_parent("tr")
+        if tr is None:
+            continue
+        tds = tr.find_all("td")
+        cells = [td.get_text(" ", strip=True) for td in tds]
+        idx = next((i for i, td in enumerate(tds) if td.find("a", href=a["href"])), 0)
+        y = next((to_float(c) for c in cells[idx + 1:] if to_float(c) is not None), None)
+        if y is None:
+            continue
+        yields[key] = {"yield": y / 100, "date": cells[-1] if cells else "", "name": pretty(key)}
+    if not yields:
+        raise ValueError("No yield rows found (page layout changed or request blocked).")
+    return yields
+
+
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def fetch_bond_yields() -> dict:
-    """10-year government bond yields scraped from tradingeconomics.com/bonds."""
-    try:
-        html = http_get(TE_URL).text
-        soup = BeautifulSoup(html, "lxml")
-        yields = {}
-        for a in soup.find_all("a", href=True):
-            m = re.match(r"^/([a-z\-]+)/government-bond-yield/?$", a["href"])
-            if not m:
-                continue
-            slug = m.group(1)
-            key = canon(slug.replace("-", " "))
-            if key in yields:
-                continue
-            tr = a.find_parent("tr")
-            if tr is None:
-                continue
-            cells = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
-            # locate the name cell, then the first numeric cell after it is the yield
-            try:
-                idx = next(i for i, td in enumerate(tr.find_all("td")) if td.find("a", href=a["href"]))
-            except StopIteration:
-                idx = 0
-            y = None
-            for c in cells[idx + 1:]:
-                y = to_float(c)
-                if y is not None:
-                    break
-            if y is None:
-                continue
-            date = cells[-1] if cells else ""
-            yields[key] = {"yield": y / 100, "date": date, "name": pretty(key),
-                           "label": a.get_text(" ", strip=True)}
-        if not yields:
-            raise ValueError("No yield rows found (page layout changed or request blocked).")
-        return result(True, yields, "Trading Economics - 10Y government bond yields",
-                      TE_URL, "Quote date per country (as shown on Trading Economics)")
-    except Exception as e:  # noqa: BLE001
-        return result(False, {}, "Trading Economics - 10Y government bond yields",
-                      TE_URL, error=str(e))
+    """10Y government bond yields from tradingeconomics.com/bonds.
 
+    Scrapes the page live. If Trading Economics blocks the request (common from
+    cloud hosts), falls back to TE_SNAPSHOT: the same page scraped on
+    TE_SNAPSHOT_DATE and embedded below.
+    """
+    src = "Trading Economics - 10Y government bond yields"
+    try:
+        return result(True, _parse_te(http_get(TE_URL).text), src, TE_URL,
+                      "Quote date per country (live)")
+    except Exception as e:  # noqa: BLE001
+        snap = {canon(slug.replace("-", " ")): {"yield": y / 100, "date": d,
+                                               "name": pretty(canon(slug.replace("-", " ")))}
+                for slug, (y, d) in TE_SNAPSHOT.items()}
+        return result(True, snap, f"{src} (embedded snapshot - live fetch blocked)", TE_URL,
+                      f"Snapshot scraped {TE_SNAPSHOT_DATE}; quote date per country",
+                      error=f"Live fetch failed, using embedded snapshot: {e}")
 
 # ----------------------------------------------------------------------------
 # Finance
@@ -442,6 +506,9 @@ tax_rates: dict = tax_r["data"] or {}
 yields: dict = yields_r["data"] or {}
 
 failed = [r["source"] for r in (betas_r, spread_r, tax_r, yields_r) if not r["ok"]]
+if "embedded snapshot" in yields_r["source"]:
+    st.info(f"Trading Economics blocked the live request, so 10Y yields come from the "
+            f"Trading Economics snapshot embedded in the app ({TE_SNAPSHOT_DATE}).")
 if failed:
     st.warning(
         "Some sources could not be fetched; use the manual overrides in the sidebar "
@@ -575,12 +642,12 @@ st.info(
 st.subheader("Inputs and data sources")
 
 
-def src_row(item, value, r, overridden, is_beta=False, date=None):
+def src_row(item, value, r, overridden, is_beta=False, date=None, source=None):
     return {
         "Input": item,
         "Value used": f"{value:.3f}" if is_beta else pct(value),
         "Origin": "Manual override" if overridden else ("Fetched" if r["ok"] else "Manual (fetch failed)"),
-        "Source": r["source"],
+        "Source": source or r["source"],
         "Data date": date or r["data_date"],
         "Fetched at": r["fetched_at"],
         "URL": r["url"],
